@@ -26,7 +26,13 @@ Get-Process powershell -ErrorAction SilentlyContinue | ForEach-Object {
     } catch { }
   }
 }
-Start-Sleep -Milliseconds 500
+# wait until every old instance is really gone, otherwise two panels can end up on screen
+$deadline = (Get-Date).AddSeconds(4)
+do {
+  $alive = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like ("*" + $ps1 + "*") })
+  if ($alive.Count -gt 0) { $alive | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }
+  Start-Sleep -Milliseconds 200
+} while ($alive.Count -gt 0 -and (Get-Date) -lt $deadline)
 
 # start
 Start-Process wscript.exe -ArgumentList ('"' + $vbsPath + '"') -WindowStyle Hidden
