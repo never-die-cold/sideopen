@@ -286,6 +286,8 @@ static void DrawTextWrap(Graphics& g, const wstring& s, Font* f, RectF r, Color 
 
 // ---------------------------------------------------------------- icons
 static std::map<wstring, HBITMAP> gIconCache;
+// 44 logical px at 150% = 66 physical; 96 keeps it crisp without storing 256px bitmaps
+static const int kIconPx = 96;
 
 static HBITMAP LoadIconFor(const wstring& path, int want) {
     auto it = gIconCache.find(path);
@@ -576,7 +578,7 @@ static void PaintRail(Geom& o) {
         bool sel = (i == g.searchSel);
         if (sel) FillRound(g2, row, (float)Scale(g.s, 7), HexColor(g.cfg.accent, 235));
         int isz = Scale(g.s, 18);
-        HBITMAP hb = LoadIconFor(g.searchHits[i]->path, 256);
+        HBITMAP hb = LoadIconFor(g.searchHits[i]->path, kIconPx);
         if (hb) {
             Bitmap ib(hb, nullptr);
             g2.DrawImage(&ib, RectF(row.X + (float)Scale(g.s, 9), row.Y + (float)((o.rowH - Scale(g.s, 4) - isz) / 2), (float)isz, (float)isz));
@@ -630,7 +632,7 @@ static void PaintFly(int idx, Geom& o) {
             StrokeRound(g2, RectF(x + 3.5f, y + 2.5f, (float)tw - 7, (float)th - 7), (float)Scale(g.s, 14), Color(28, 255, 255, 255), 1.0f);
         }
 
-        HBITMAP hb = LoadIconFor(cat.items[k].path, 256);
+        HBITMAP hb = LoadIconFor(cat.items[k].path, kIconPx);
         if (hb) {
             Bitmap ib(hb, nullptr);
             float iy = y + (float)Scale(g.s, 14) - (hot ? 1.0f : 0.0f);
@@ -917,7 +919,7 @@ static void GhostShow(int catIdx, int itemIdx) {
     FillRound(gg, RectF(2, 2, (float)tw - 4, (float)th - 4), (float)Scale(g.s, 10), HexColor(g.cfg.bg, 240));
     StrokeRound(gg, RectF(2.5f, 2.5f, (float)tw - 5, (float)th - 5), (float)Scale(g.s, 10), HexColor(g.cfg.accent, 220), 2.0f);
     int isz = Scale(g.s, g.cfg.iconSize);
-    HBITMAP hb = LoadIconFor(it.path, 256);
+    HBITMAP hb = LoadIconFor(it.path, kIconPx);
     if (hb) { Bitmap ib(hb, nullptr); gg.DrawImage(&ib, RectF((tw - isz) / 2.0f, (float)Scale(g.s, 12), (float)isz, (float)isz)); }
     DrawTextWrap(gg, it.label, gFonts.tile, RectF(4, (float)Scale(g.s, 12 + g.cfg.iconSize + 6), (float)(tw - 8),
         (float)(th - Scale(g.s, 12 + g.cfg.iconSize + 6) - 6)), HexColor(g.cfg.fg, 235));
@@ -1024,7 +1026,7 @@ static void SearchPaint() {
     for (size_t i = 0; i < g.searchHits.size() && i < 8; i++) {
         RectF r((float)Scale(g.s, 10), (float)y, (float)w - (float)Scale(g.s, 20), (float)rowH - (float)Scale(g.s, 4));
         if ((int)i == g.searchSel) FillRound(gg, r, (float)Scale(g.s, 10), HexColor(g.cfg.accent, 220));
-        HBITMAP hb = LoadIconFor(g.searchHits[i]->path, 256);
+        HBITMAP hb = LoadIconFor(g.searchHits[i]->path, kIconPx);
         if (hb) { Bitmap ib(hb, nullptr); gg.DrawImage(&ib, RectF(r.X + (float)Scale(g.s, 10), r.Y + (float)Scale(g.s, 6), (float)Scale(g.s, 28), (float)Scale(g.s, 28))); }
         Color tc = ((int)i == g.searchSel) ? Color(255, 255, 255, 255) : HexColor(g.cfg.fg, 235);
         DrawText2(gg, g.searchHits[i]->label, gFonts.row, RectF(r.X + (float)Scale(g.s, 50), r.Y, r.Width - (float)Scale(g.s, 60), r.Height), tc, StringAlignmentNear);
