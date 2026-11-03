@@ -489,8 +489,30 @@ static void PaintRail(Geom& o) {
     DrawPanelChrome(g2, body, rad);
 
     DrawText2(g2, L"应用", gFonts.head,
-        RectF((float)Scale(g.s, 20), (float)Scale(g.s, 14), 200.f, (float)Scale(g.s, 22)),
-        Color(115, 255, 255, 255), StringAlignmentNear);
+        RectF((float)Scale(g.s, 20), (float)Scale(g.s, 14), 60.f, (float)Scale(g.s, 22)),
+        Color(170, 255, 255, 255), StringAlignmentNear);
+
+    {
+        float px = (float)Scale(g.s, 66);
+        float py = (float)Scale(g.s, 10);
+        float pw = (float)o.railW - px - (float)Scale(g.s, 12);
+        float ph = (float)Scale(g.s, 26);
+        RectF pill(px, py, pw, ph);
+        FillRound(g2, pill, ph / 2.0f, Color(30, 255, 255, 255));
+        StrokeRound(g2, RectF(pill.X + 0.5f, pill.Y + 0.5f, pill.Width - 1, pill.Height - 1), ph / 2.0f, Color(26, 255, 255, 255), 1.0f);
+
+        float icx = pill.X + (float)Scale(g.s, 14);
+        float icy = pill.Y + ph / 2.0f;
+        Pen sp(Color(170, 255, 255, 255), 1.6f);
+        g2.DrawEllipse(&sp, RectF(icx - 4.5f, icy - 4.5f, 9.0f, 9.0f));
+        g2.DrawLine(&sp, icx + 3.0f, icy + 3.0f, icx + 6.5f, icy + 6.5f);
+
+        wstring hint = g.query.empty() ? L"搜索" : g.query;
+        Color hc = g.query.empty() ? Color(125, 255, 255, 255) : Color(240, 255, 255, 255);
+        DrawText2(g2, hint, gFonts.count,
+            RectF(pill.X + (float)Scale(g.s, 25), pill.Y, pill.Width - (float)Scale(g.s, 31), pill.Height),
+            hc, StringAlignmentNear);
+    }
 
     float rowTop = (float)o.headH - (float)Scale(g.s, 6);
     for (size_t i = 0; i < g.cats.size(); i++) {
@@ -626,7 +648,8 @@ static void StepAnim(Anim& A, Surface& S, HWND wnd, int x, int y) {
     DWORD el = GetTickCount() - A.t0;
     float k = A.dur > 0 ? (float)el / (float)A.dur : 1.0f;
     if (k > 1.0f) k = 1.0f;
-    float e = 1.0f - (1.0f - k) * (1.0f - k) * (1.0f - k);   // ease-out cubic
+    float q = 1.0f - k;
+    float e = 1.0f - q * q * q * q;   // ease-out quart: softer settle
     float a = A.a0 + (A.a1 - A.a0) * e;
     float sc = A.s0 + (A.s1 - A.s0) * e;
     ComposeTo(S, a, sc);
@@ -668,7 +691,7 @@ static void ShowRail() {
     gRailGeom = ComputeRailGeom();
     ShowWindow(g.rail, SW_SHOWNOACTIVATE);
     PaintRail(gRailGeom);
-    StartAnim(gRailAnim, 1, 170, 0.0f, 1.0f, 0.94f, 1.0f);
+    StartAnim(gRailAnim, 1, 320, 0.0f, 1.0f, 0.90f, 1.0f);
 }
 
 static void HideRail() {
@@ -676,7 +699,7 @@ static void HideRail() {
     g.railOn = false;
     g.curCat = -1;
     g.hoverRow = -1;
-    StartAnim(gRailAnim, 2, 110, 1.0f, 0.0f, 1.0f, 0.98f);
+    StartAnim(gRailAnim, 2, 200, 1.0f, 0.0f, 1.0f, 0.97f);
     HideFly();
 }
 
@@ -685,7 +708,7 @@ static void HideFly() {
     g.flyOn = false;
     g.curCat = -1;
     gFlyCat = -1;
-    StartAnim(gFlyAnim, 2, 100, 1.0f, 0.0f, 1.0f, 0.98f);
+    StartAnim(gFlyAnim, 2, 180, 1.0f, 0.0f, 1.0f, 0.97f);
     if (g.railOn) { PaintRail(gRailGeom); PresentRailStatic(); }
 }
 
@@ -700,13 +723,23 @@ static void ShowFly(int idx) {
     gFlyGeom = gm;
     ShowWindow(g.fly, SW_SHOWNOACTIVATE);
     PaintFly(idx, gFlyGeom);
-    StartAnim(gFlyAnim, 1, 150, 0.0f, 1.0f, 0.96f, 1.0f);
+    StartAnim(gFlyAnim, 1, 280, 0.0f, 1.0f, 0.93f, 1.0f);
     PaintRail(gRailGeom);
     PresentRailStatic();
 }
 
 // ---------------------------------------------------------------- actions
 static void Launch(const wstring& path) { ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); }
+
+static RECT SearchPillRect() {
+    Geom& o = gRailGeom;
+    int x = o.railX + Scale(g.s, 66);
+    int y = o.railY + Scale(g.s, 10);
+    int w = o.railW - Scale(g.s, 78);
+    int h = Scale(g.s, 26);
+    RECT r{ x, y, x + w, y + h };
+    return r;
+}
 
 static int RowAt(POINT p) {
     if (p.x < gRailGeom.railX || p.x >= gRailGeom.railX + gRailGeom.railW) return -1;
@@ -846,17 +879,25 @@ static void SearchBuild() {
     }
 }
 
+static int gSearchW = 520;
+static int gSearchX = 0;
+static int gSearchY = 0;
+
 static void SearchPaint() {
-    int w = Scale(g.s, 640);
+    int m = ShadowPx();
+    int w = gSearchW;
     int rowH = Scale(g.s, 46);
     int n = (int)std::min<size_t>(g.searchHits.size(), 8);
     if (n < 1) n = 1;
-    int h = Scale(g.s, 76) + n * rowH + Scale(g.s, 12);
-    surfSearch.Ensure(w, h);
-    Graphics& gg = *surfSearch.g;
+    int h = Scale(g.s, 70) + n * rowH + Scale(g.s, 10);
+    surfSearch.Ensure(w + 2 * m, h + 2 * m);
+    surfSearch.EnsureBase(w + 2 * m, h + 2 * m);
+    Graphics& gg = *surfSearch.bg;
+    gg.ResetTransform();
     gg.Clear(Color(0, 0, 0, 0));
-    FillRound(gg, RectF(0, 0, (float)w, (float)h), (float)Scale(g.s, 16), HexColor(g.cfg.bg, (BYTE)g.cfg.opacity));
-    StrokeRound(gg, RectF(0.5f, 0.5f, (float)w - 1, (float)h - 1), (float)Scale(g.s, 16), Color(48, 255, 255, 255), 1.0f);
+    gg.TranslateTransform((float)m, (float)m);
+    DrawSoftShadow(gg, RectF(0, 0, (float)w, (float)h), (float)Scale(g.s, 18));
+    DrawPanelChrome(gg, RectF(0, 0, (float)w, (float)h), (float)Scale(g.s, 18));
 
     wstring shown = g.query.empty() ? L"输入以搜索…" : g.query;
     Color qc = g.query.empty() ? HexColor(g.cfg.dim) : HexColor(g.cfg.fg);
@@ -873,16 +914,26 @@ static void SearchPaint() {
         y += rowH;
     }
 
-    int x = (g.scrW - w) / 2;
-    surfSearch.Present(x, Scale(g.s, 120));
+    ComposeTo(surfSearch, 1.0f, 1.0f);
+    surfSearch.Present(gSearchX - m, gSearchY - m);
 }
 
 static void SearchShow() {
     g.searching = true;
     g.query.clear();
     g.searchSel = 0;
+    if (g.flyOn) HideFly();
+    gSearchW = Scale(g.s, 520);
+    int gap = Scale(g.s, 10);
+    if (g.cfg.edge == L"right") gSearchX = gRailGeom.railX - gSearchW - gap;
+    else if (g.cfg.edge == L"left") gSearchX = gRailGeom.railX + gRailGeom.railW + gap;
+    else gSearchX = (g.scrW - gSearchW) / 2;
+    gSearchY = gRailGeom.railY;
+    if (gSearchX < gap) gSearchX = gap;
     SearchBuild();
     SearchPaint();
+    ShowWindow(gSearch, SW_SHOWNOACTIVATE);
+    SetWindowPos(gSearch, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     SetForegroundWindow(gSearch);
     SetFocus(gSearch);
 }
@@ -918,8 +969,7 @@ static LRESULT CALLBACK SearchProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == VK_UP) { if (g.searchSel > 0) { g.searchSel--; SearchPaint(); } return 0; }
         return 0;
     case WM_KILLFOCUS:
-        SearchHide();
-        return 0;
+        return 0;   // rely on Esc / outside click instead of focus events
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -937,6 +987,16 @@ static void Tick() {
     }
 
     bool down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    static bool prevDownSearch = false;
+    if (g.searching) {
+        if (down && !prevDownSearch) {
+            POINT q; GetCursorPos(&q);
+            RECT sr{ gSearchX, gSearchY, gSearchX + gSearchW, gSearchY + Scale(g.s, 70) + 8 * Scale(g.s, 46) };
+            if (!PtInRect(&sr, q)) SearchHide();
+        }
+        prevDownSearch = down;
+        g.missTicks = 0;
+    }
 
     if (g.cfg.hideFullscreen && FullscreenActive()) {
         if (!g.fullscreenHidden) { HideFly(); HideRail(); g.fullscreenHidden = true; }
@@ -961,17 +1021,6 @@ static void Tick() {
         gHoverTile = -1;
     }
 
-    if (down && !prevDown) {
-        g.pressTick = GetTickCount();
-        g.pressPending = true;
-        g.dragStart = p;
-        g.dragItem = -1;
-        g.dragCat = -1;
-        if (g.flyOn && inFly) {
-            int idx = TileAt(p, gFlyCat);
-            if (idx >= 0) { g.dragCat = gFlyCat; g.dragItem = idx; }
-        }
-    }
 
     if (g.pressPending && down && !g.dragging) {
         int dx = abs(p.x - g.dragStart.x), dy = abs(p.y - g.dragStart.y);
@@ -996,16 +1045,7 @@ static void Tick() {
         return;
     }
 
-    if (!down && prevDown && g.pressPending) {
-        if (g.flyOn && inFly) {
-            int idx = TileAt(p, gFlyCat);
-            if (idx >= 0) Launch(g.cats[gFlyCat].items[idx].path);
-        } else if (g.railOn && inRail) {
-            int row = RowAt(p);
-            if (row >= 0) ShowFly(row);
-        }
-        g.pressPending = false;
-    }
+
     prevDown = down;
 
     if (inHot || inRail || inFly) {
@@ -1026,7 +1066,42 @@ static void Tick() {
 }
 
 // ---------------------------------------------------------------- procs
+static void HandleClick(POINT p) {
+    if (g.flyOn) {
+        int idx = TileAt(p, gFlyCat);
+        if (idx >= 0) { Launch(g.cats[gFlyCat].items[idx].path); return; }
+    }
+    if (g.railOn) {
+        RECT pr = SearchPillRect();
+        if (PtInRect(&pr, p)) { SearchShow(); return; }
+        int row = RowAt(p);
+        if (row >= 0) ShowFly(row);
+    }
+}
+
 static LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_LBUTTONDOWN: {
+        POINT p; GetCursorPos(&p);
+        g.pressTick = GetTickCount();
+        g.pressPending = true;
+        g.dragStart = p;
+        g.dragItem = -1;
+        g.dragCat = -1;
+        if (g.flyOn) {
+            int idx = TileAt(p, gFlyCat);
+            if (idx >= 0) { g.dragCat = gFlyCat; g.dragItem = idx; }
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        POINT p; GetCursorPos(&p);
+        bool wasPending = g.pressPending;
+        g.pressPending = false;
+        if (wasPending && !g.dragging) HandleClick(p);
+        return 0;
+    }
+    }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
@@ -1101,7 +1176,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     surfFly.hwnd = g.fly;
     surfGhost.hwnd = g.ghost;
 
-    gSearch = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kSearchClass, L"SideOpenSearch",
+    gSearch = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kSearchClass, L"SideOpenSearch",
         WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, hInst, nullptr);
     surfSearch.hwnd = gSearch;
 
