@@ -148,10 +148,14 @@ struct Surface {
     int w = 0, h = 0;
     Bitmap* gbmp = nullptr;
     Graphics* g = nullptr;
+    Bitmap* base = nullptr;
+    Graphics* bg = nullptr;
 
     void Release() {
         if (g) { delete g; g = nullptr; }
         if (gbmp) { delete gbmp; gbmp = nullptr; }
+        if (bg) { delete bg; bg = nullptr; }
+        if (base) { delete base; base = nullptr; }
         if (memdc) { SelectObject(memdc, oldBmp); DeleteDC(memdc); memdc = nullptr; }
         if (dib) { DeleteObject(dib); dib = nullptr; bits = nullptr; }
         w = h = 0;
@@ -178,6 +182,18 @@ struct Surface {
         g->SetSmoothingMode(SmoothingModeAntiAlias);
         g->SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
         g->SetPixelOffsetMode(PixelOffsetModeHalf);
+    }
+
+    // the layer everything is painted into; the window surface is composed from it
+    void EnsureBase(int nw, int nh) {
+        if (base && base->GetWidth() == nw && base->GetHeight() == nh) return;
+        if (bg) { delete bg; bg = nullptr; }
+        if (base) { delete base; base = nullptr; }
+        base = new Bitmap(nw, nh, PixelFormat32bppPARGB);
+        bg = new Graphics(base);
+        bg->SetSmoothingMode(SmoothingModeAntiAlias);
+        bg->SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+        bg->SetPixelOffsetMode(PixelOffsetModeHalf);
     }
 
     void Present(int x, int y) {
@@ -225,16 +241,27 @@ struct Fonts {
     Font* head = nullptr;
     Font* big = nullptr;
     Font* count = nullptr;
+    FontFamily* family = nullptr;
+
+    static FontFamily* Pick(double) {
+        // Windows 11 has the variable Segoe; older builds fall back, CJK resolves to YaHei
+        const wchar_t* names[] = { L"Segoe UI Variable Display", L"Segoe UI" };
+        for (int i = 0; i < 2; i++) {
+            FontFamily f(names[i]);
+            if (f.GetLastStatus() == Ok && f.IsAvailable()) return new FontFamily(names[i]);
+        }
+        return new FontFamily(L"Microsoft YaHei UI");
+    }
 
     void Init(double s) {
-        FontFamily fam(L"Microsoft YaHei UI");
-        row = new Font(&fam, (float)(10.5 * s), FontStyleRegular, UnitPixel);
-        tile = new Font(&fam, (float)(8.5 * s), FontStyleRegular, UnitPixel);
-        head = new Font(&fam, (float)(9.0 * s), FontStyleBold, UnitPixel);
-        big = new Font(&fam, (float)(12.0 * s), FontStyleRegular, UnitPixel);
-        count = new Font(&fam, (float)(8.5 * s), FontStyleRegular, UnitPixel);
+        family = Pick(s);
+        row = new Font(family, (float)(12.0 * s), FontStyleRegular, UnitPixel);
+        tile = new Font(family, (float)(9.0 * s), FontStyleRegular, UnitPixel);
+        head = new Font(family, (float)(9.5 * s), FontStyleBold, UnitPixel);
+        big = new Font(family, (float)(13.0 * s), FontStyleRegular, UnitPixel);
+        count = new Font(family, (float)(9.0 * s), FontStyleRegular, UnitPixel);
     }
-    void Free() { delete row; delete tile; delete head; delete big; delete count; row = tile = head = big = count = nullptr; }
+    void Free() { delete row; delete tile; delete head; delete big; delete count; delete family; row = tile = head = big = count = nullptr; family = nullptr; }
 };
 static Fonts gFonts;
 
@@ -450,7 +477,8 @@ static void DrawPanelChrome(Graphics& g2, RectF r, float rad) {
 static void PaintRail(Geom& o) {
     int m = ShadowPx();
     surfRail.Ensure(o.railW + 2 * m, o.railH + 2 * m);
-    Graphics& g2 = *surfRail.g;
+    surfRail.EnsureBase(o.railW + 2 * m, o.railH + 2 * m);
+    Graphics& g2 = *surfRail.bg;
     g2.ResetTransform();
     g2.Clear(Color(0, 0, 0, 0));
     g2.TranslateTransform((float)m, (float)m);
@@ -493,7 +521,8 @@ static void PaintFly(int idx, Geom& o) {
     if (idx < 0 || idx >= (int)g.cats.size()) return;
     int m = ShadowPx();
     surfFly.Ensure(o.flyW + 2 * m, o.flyH + 2 * m);
-    Graphics& g2 = *surfFly.g;
+    surfFly.EnsureBase(o.flyW + 2 * m, o.flyH + 2 * m);
+    Graphics& g2 = *surfFly.bg;
     g2.ResetTransform();
     g2.Clear(Color(0, 0, 0, 0));
     g2.TranslateTransform((float)m, (float)m);
@@ -543,14 +572,86 @@ static void PaintFly(int idx, Geom& o) {
     }
 }
 
+static Geom gRailGeom;
+static Geom gFlyGeom;
+
+// ---------------------------------------------------------------- animation
+struct Anim {
+    int state = 0;      // 0 idle, 1 showing, 2 hiding
+    DWORD t0 = 0;
+    int dur = 0;
+    float a0 = 1, a1 = 1, s0 = 1, s1 = 1;
+    int x = 0, y = 0;
+};
+static Anim gRailAnim, gFlyAnim;
+static const int kAnimTimer = 2;
+
+static void ComposeTo(Surface& s, float alpha, float scale) {
+    if (!s.base || !s.g) return;
+    Graphics& g = *s.g;
+    g.ResetTransform();
+    g.Clear(Color(0, 0, 0, 0));
+    if (alpha <= 0.004f) return;
+    int w = s.base->GetWidth(), h = s.base->GetHeight();
+    float dw = w * scale, dh = h * scale;
+    float dx = (w - dw) / 2.0f, dy = (h - dh) / 2.0f;
+    ImageAttributes ia;
+    ColorMatrix cm = {
+        1,0,0,0,0,
+        0,1,0,0,0,
+        0,0,1,0,0,
+        0,0,0,alpha,0,
+        0,0,0,0,1 };
+    ia.SetColorMatrix(&cm, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+    g.DrawImage(s.base, RectF(dx, dy, dw, dh), 0.0f, 0.0f, (float)w, (float)h, UnitPixel, &ia);
+}
+
+static void PresentRailStatic() {
+    ComposeTo(surfRail, 1.0f, 1.0f);
+    surfRail.Present(gRailGeom.railX - ShadowPx(), gRailGeom.railY - ShadowPx());
+}
+static void PresentFlyStatic() {
+    ComposeTo(surfFly, 1.0f, 1.0f);
+    surfFly.Present(gFlyGeom.flyX - ShadowPx(), gFlyGeom.flyY - ShadowPx());
+}
+
+static void StartAnim(Anim& A, int state, int dur, float a0, float a1, float s0, float s1) {
+    A.state = state; A.t0 = GetTickCount(); A.dur = dur;
+    A.a0 = a0; A.a1 = a1; A.s0 = s0; A.s1 = s1;
+    SetTimer(g.msgw, kAnimTimer, 15, nullptr);
+}
+
+static void StepAnim(Anim& A, Surface& S, HWND wnd, int x, int y) {
+    if (A.state == 0) return;
+    DWORD el = GetTickCount() - A.t0;
+    float k = A.dur > 0 ? (float)el / (float)A.dur : 1.0f;
+    if (k > 1.0f) k = 1.0f;
+    float e = 1.0f - (1.0f - k) * (1.0f - k) * (1.0f - k);   // ease-out cubic
+    float a = A.a0 + (A.a1 - A.a0) * e;
+    float sc = A.s0 + (A.s1 - A.s0) * e;
+    ComposeTo(S, a, sc);
+    S.Present(x, y);
+    if (k >= 1.0f) {
+        if (A.state == 2) ShowWindow(wnd, SW_HIDE);
+        A.state = 0;
+    }
+}
+
+static bool AnimBusy() { return gRailAnim.state != 0 || gFlyAnim.state != 0; }
+
+static void AnimTick() {
+    int m = ShadowPx();
+    StepAnim(gRailAnim, surfRail, g.rail, gRailGeom.railX - m, gRailGeom.railY - m);
+    StepAnim(gFlyAnim, surfFly, g.fly, gFlyGeom.flyX - m, gFlyGeom.flyY - m);
+    if (!AnimBusy()) KillTimer(g.msgw, kAnimTimer);
+}
+
 // ---------------------------------------------------------------- windows
 static const wchar_t* kWndClass = L"SideOpenPanel";
 static const wchar_t* kSearchClass = L"SideOpenSearch";
 static const UINT WM_TRAY = WM_APP + 1;
 static const UINT_PTR kTimer = 1;
 
-static Geom gRailGeom;
-static Geom gFlyGeom;
 static int gFlyCat = -1;
 static bool gPin = false;
 
@@ -565,9 +666,9 @@ static void ShowRail() {
     g.railOn = true;
     ComputeColumns();
     gRailGeom = ComputeRailGeom();
-    PaintRail(gRailGeom);
-    surfRail.Present(gRailGeom.railX - ShadowPx(), gRailGeom.railY - ShadowPx());
     ShowWindow(g.rail, SW_SHOWNOACTIVATE);
+    PaintRail(gRailGeom);
+    StartAnim(gRailAnim, 1, 170, 0.0f, 1.0f, 0.94f, 1.0f);
 }
 
 static void HideRail() {
@@ -575,7 +676,7 @@ static void HideRail() {
     g.railOn = false;
     g.curCat = -1;
     g.hoverRow = -1;
-    ShowWindow(g.rail, SW_HIDE);
+    StartAnim(gRailAnim, 2, 110, 1.0f, 0.0f, 1.0f, 0.98f);
     HideFly();
 }
 
@@ -584,8 +685,8 @@ static void HideFly() {
     g.flyOn = false;
     g.curCat = -1;
     gFlyCat = -1;
-    ShowWindow(g.fly, SW_HIDE);
-    if (g.railOn) { PaintRail(gRailGeom); surfRail.Present(gRailGeom.railX - ShadowPx(), gRailGeom.railY - ShadowPx()); }
+    StartAnim(gFlyAnim, 2, 100, 1.0f, 0.0f, 1.0f, 0.98f);
+    if (g.railOn) { PaintRail(gRailGeom); PresentRailStatic(); }
 }
 
 static void ShowFly(int idx) {
@@ -597,11 +698,11 @@ static void ShowFly(int idx) {
     Geom gm = gRailGeom;
     ComputeFlyGeom(idx, gm);
     gFlyGeom = gm;
-    PaintFly(idx, gFlyGeom);
     ShowWindow(g.fly, SW_SHOWNOACTIVATE);
-    surfFly.Present(gFlyGeom.flyX - ShadowPx(), gFlyGeom.flyY - ShadowPx());
+    PaintFly(idx, gFlyGeom);
+    StartAnim(gFlyAnim, 1, 150, 0.0f, 1.0f, 0.96f, 1.0f);
     PaintRail(gRailGeom);
-    surfRail.Present(gRailGeom.railX - ShadowPx(), gRailGeom.railY - ShadowPx());
+    PresentRailStatic();
 }
 
 // ---------------------------------------------------------------- actions
@@ -695,7 +796,7 @@ static void DropAt(POINT p) {
         ComputeColumns();
         gRailGeom = ComputeRailGeom();
         PaintRail(gRailGeom);
-        surfRail.Present(gRailGeom.railX - ShadowPx(), gRailGeom.railY - ShadowPx());
+        PresentRailStatic();
         ShowFly(targetRow);
     }
 }
@@ -854,7 +955,7 @@ static void Tick() {
         if (hv != gHoverTile) {
             gHoverTile = hv;
             PaintFly(gFlyCat, gFlyGeom);
-            surfFly.Present(gFlyGeom.flyX - ShadowPx(), gFlyGeom.flyY - ShadowPx());
+            PresentFlyStatic();
         }
     } else if (!g.flyOn && gHoverTile != -1) {
         gHoverTile = -1;
@@ -915,7 +1016,7 @@ static void Tick() {
             if (row != g.hoverRow) {
                 g.hoverRow = row;
                 PaintRail(gRailGeom);
-                surfRail.Present(gRailGeom.railX - ShadowPx(), gRailGeom.railY - ShadowPx());
+                PresentRailStatic();
             }
             if (row >= 0 && row != g.curCat) ShowFly(row);
         }
@@ -931,7 +1032,10 @@ static LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 static LRESULT CALLBACK MsgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_TIMER: if (wp == kTimer) Tick(); return 0;
+    case WM_TIMER:
+        if (wp == kTimer) Tick();
+        else if (wp == (WPARAM)kAnimTimer) AnimTick();
+        return 0;
     case WM_HOTKEY: if (wp == 1) { if (g.searching) SearchHide(); else SearchShow(); } return 0;
     case WM_TRAY: if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP) TrayMenu(hwnd); return 0;
     }
