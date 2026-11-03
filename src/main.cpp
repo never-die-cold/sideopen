@@ -37,7 +37,7 @@ struct Config {
     wstring edge = L"right";
     wstring root;
     int railWidth = 236;
-    int rowHeight = 50;
+    int rowHeight = 40;
     int tileW = 106;
     int tileH = 120;
     int hotZone = 6;
@@ -224,6 +224,7 @@ struct Fonts {
     Font* tile = nullptr;
     Font* head = nullptr;
     Font* big = nullptr;
+    Font* count = nullptr;
 
     void Init(double s) {
         FontFamily fam(L"Microsoft YaHei UI");
@@ -231,8 +232,9 @@ struct Fonts {
         tile = new Font(&fam, (float)(8.5 * s), FontStyleRegular, UnitPixel);
         head = new Font(&fam, (float)(9.0 * s), FontStyleBold, UnitPixel);
         big = new Font(&fam, (float)(12.0 * s), FontStyleRegular, UnitPixel);
+        count = new Font(&fam, (float)(8.5 * s), FontStyleRegular, UnitPixel);
     }
-    void Free() { delete row; delete tile; delete head; delete big; row = tile = head = big = nullptr; }
+    void Free() { delete row; delete tile; delete head; delete big; delete count; row = tile = head = big = count = nullptr; }
 };
 static Fonts gFonts;
 
@@ -304,7 +306,7 @@ static Geom ComputeRailGeom() {
     o.headH = Scale(s, 46);
     o.rowH = Scale(s, g.cfg.rowHeight);
     o.railW = Scale(s, g.cfg.railWidth);
-    o.railH = o.headH + (int)g.cats.size() * o.rowH + Scale(s, 14);
+    o.railH = o.headH + (int)g.cats.size() * o.rowH + Scale(s, 6);
 
     int hot = Scale(s, g.cfg.hotZone);
     if (g.cfg.edge == L"right") {
@@ -411,63 +413,133 @@ static void ComputeColumns() {
     }
 }
 
+
 // ---------------------------------------------------------------- paint
+static int gHoverTile = -1;
+static int ShadowPx() { return Scale(g.s, 20); }
+
+// soft drop shadow drawn as stacked, shrinking rounded rects
+static void DrawSoftShadow(Graphics& g2, RectF r, float rad) {
+    int px = ShadowPx();
+    for (int i = px; i >= 1; i--) {
+        float t = (float)i / (float)px;
+        int a = (int)(26 * (1.0f - t) * (1.0f - t));
+        if (a <= 0) continue;
+        RectF rr(r.X - i, r.Y - i + 2, r.Width + i * 2, r.Height + i * 2);
+        FillRound(g2, rr, rad + i * 0.6f, Color(a, 0, 0, 0));
+    }
+}
+
+static void DrawPanelChrome(Graphics& g2, RectF r, float rad) {
+    // material: vertical gradient so it reads as a translucent sheet, not a flat box
+    LinearGradientBrush br(r, Color(236, 74, 74, 82), Color(242, 30, 30, 35), LinearGradientModeVertical);
+    GraphicsPath p;
+    float d = rad * 2;
+    p.AddArc(r.X, r.Y, d, d, 180, 90);
+    p.AddArc(r.GetRight() - d, r.Y, d, d, 270, 90);
+    p.AddArc(r.GetRight() - d, r.GetBottom() - d, d, d, 0, 90);
+    p.AddArc(r.X, r.GetBottom() - d, d, d, 90, 90);
+    p.CloseFigure();
+    g2.FillPath(&br, &p);
+
+    // rim light inside, dark outline outside
+    StrokeRound(g2, RectF(r.X + 0.5f, r.Y + 0.5f, r.Width - 1, r.Height - 1), rad, Color(38, 255, 255, 255), 1.0f);
+    StrokeRound(g2, RectF(r.X - 0.5f, r.Y - 0.5f, r.Width + 1, r.Height + 1), rad, Color(70, 0, 0, 0), 1.0f);
+}
+
 static void PaintRail(Geom& o) {
-    surfRail.Ensure(o.railW, o.railH);
+    int m = ShadowPx();
+    surfRail.Ensure(o.railW + 2 * m, o.railH + 2 * m);
     Graphics& g2 = *surfRail.g;
+    g2.ResetTransform();
     g2.Clear(Color(0, 0, 0, 0));
+    g2.TranslateTransform((float)m, (float)m);
 
-    FillRound(g2, RectF(0, 0, (float)o.railW, (float)o.railH), (float)Scale(g.s, 16), HexColor(g.cfg.bg, (BYTE)g.cfg.opacity));
-    StrokeRound(g2, RectF(0.5f, 0.5f, (float)o.railW - 1, (float)o.railH - 1), (float)Scale(g.s, 16), Color(36, 255, 255, 255), 1.0f);
+    float rad = (float)Scale(g.s, 20);
+    RectF body(0, 0, (float)o.railW, (float)o.railH);
+    DrawSoftShadow(g2, body, rad);
+    DrawPanelChrome(g2, body, rad);
 
-    DrawText2(g2, L"应用", gFonts.head, RectF((float)Scale(g.s, 20), (float)Scale(g.s, 12), 200.f, (float)Scale(g.s, 26)), HexColor(g.cfg.dim), StringAlignmentNear);
+    DrawText2(g2, L"应用", gFonts.head,
+        RectF((float)Scale(g.s, 20), (float)Scale(g.s, 14), 200.f, (float)Scale(g.s, 22)),
+        Color(115, 255, 255, 255), StringAlignmentNear);
 
+    float rowTop = (float)o.headH - (float)Scale(g.s, 6);
     for (size_t i = 0; i < g.cats.size(); i++) {
-        float y = (float)(o.headH + (int)i * o.rowH);
-        RectF row((float)Scale(g.s, 6), y + 2, (float)(o.railW - Scale(g.s, 12)), (float)(o.rowH - 4));
+        float y = rowTop + (float)((int)i * o.rowH);
+        RectF row((float)Scale(g.s, 8), y, (float)(o.railW - Scale(g.s, 16)), (float)(o.rowH - Scale(g.s, 4)));
         bool active = ((int)i == g.curCat) && g.flyOn;
         bool hovering = ((int)i == g.hoverRow) && g.railOn;
-        if (active) FillRound(g2, row, (float)Scale(g.s, 9), HexColor(g.cfg.accent, 235));
-        else if (hovering) FillRound(g2, row, (float)Scale(g.s, 9), Color(34, 255, 255, 255));
+        if (active) {
+            FillRound(g2, row, (float)Scale(g.s, 7), HexColor(g.cfg.accent, 235));
+            StrokeRound(g2, RectF(row.X + 0.5f, row.Y + 0.5f, row.Width - 1, row.Height - 1), (float)Scale(g.s, 7), Color(40, 255, 255, 255), 1.0f);
+        } else if (hovering) {
+            FillRound(g2, row, (float)Scale(g.s, 7), Color(26, 255, 255, 255));
+        }
 
-        Color fg = active ? Color(255, 255, 255, 255) : HexColor(g.cfg.fg, 235);
-        wstring label = g.cats[i].folder + L"   " + std::to_wstring(g.cats[i].items.size());
-        DrawText2(g2, label, gFonts.row, RectF(row.X + (float)Scale(g.s, 14), row.Y, row.Width - (float)Scale(g.s, 20), row.Height), fg, StringAlignmentNear);
+        Color fg = active ? Color(255, 255, 255, 255) : Color(255, 246, 246, 248);
+        wstring label = g.cats[i].folder;
+        DrawText2(g2, label, gFonts.row,
+            RectF(row.X + (float)Scale(g.s, 12), row.Y, row.Width - (float)Scale(g.s, 46), row.Height),
+            fg, StringAlignmentNear);
+
+        Color cn = active ? Color(200, 255, 255, 255) : Color(135, 255, 255, 255);
+        DrawText2(g2, std::to_wstring(g.cats[i].items.size()), gFonts.count,
+            RectF(row.X, row.Y, row.Width - (float)Scale(g.s, 10), row.Height), cn, StringAlignmentFar);
     }
 }
 
 static void PaintFly(int idx, Geom& o) {
     if (idx < 0 || idx >= (int)g.cats.size()) return;
-    surfFly.Ensure(o.flyW, o.flyH);
+    int m = ShadowPx();
+    surfFly.Ensure(o.flyW + 2 * m, o.flyH + 2 * m);
     Graphics& g2 = *surfFly.g;
+    g2.ResetTransform();
     g2.Clear(Color(0, 0, 0, 0));
+    g2.TranslateTransform((float)m, (float)m);
 
-    FillRound(g2, RectF(0, 0, (float)o.flyW, (float)o.flyH), (float)Scale(g.s, 18), HexColor(g.cfg.bg, (BYTE)g.cfg.opacity));
-    StrokeRound(g2, RectF(0.5f, 0.5f, (float)o.flyW - 1, (float)o.flyH - 1), (float)Scale(g.s, 18), Color(36, 255, 255, 255), 1.0f);
+    float rad = (float)Scale(g.s, 24);
+    RectF body(0, 0, (float)o.flyW, (float)o.flyH);
+    DrawSoftShadow(g2, body, rad);
+    DrawPanelChrome(g2, body, rad);
 
-    DrawText2(g2, g.cats[idx].folder, gFonts.head, RectF((float)Scale(g.s, 18), (float)Scale(g.s, 12), 300.f, (float)Scale(g.s, 26)), HexColor(g.cfg.dim), StringAlignmentNear);
+    DrawText2(g2, g.cats[idx].folder, gFonts.head,
+        RectF((float)Scale(g.s, 22), (float)Scale(g.s, 14), 300.f, (float)Scale(g.s, 22)),
+        Color(150, 255, 255, 255), StringAlignmentNear);
+    {
+        float ly = (float)Scale(g.s, 44);
+        FillRound(g2, RectF((float)Scale(g.s, 20), ly, (float)(o.flyW - Scale(g.s, 40)), 1.0f), 0.5f, Color(22, 255, 255, 255));
+    }
 
-    int pad = Scale(g.s, 18);
+    int pad = Scale(g.s, 20);
     int tw = Scale(g.s, g.cfg.tileW);
     int th = Scale(g.s, g.cfg.tileH);
-    int gap = Scale(g.s, 8);
+    int gap = Scale(g.s, 6);
     int isz = Scale(g.s, g.cfg.iconSize);
+    int headY = o.headH + Scale(g.s, 6);
 
     auto& cat = g.cats[idx];
     for (size_t k = 0; k < cat.items.size(); k++) {
         int col = (int)k % cat.cols;
         int row = (int)k / cat.cols;
         float x = (float)(pad + col * (tw + gap));
-        float y = (float)(o.headH + row * (th + gap));
+        float y = (float)(headY + row * (th + gap));
+
+        bool hot = ((int)k == gHoverTile);
+        if (hot) {
+            FillRound(g2, RectF(x + 3, y + 2, (float)tw - 6, (float)th - 6), (float)Scale(g.s, 14), Color(24, 255, 255, 255));
+            StrokeRound(g2, RectF(x + 3.5f, y + 2.5f, (float)tw - 7, (float)th - 7), (float)Scale(g.s, 14), Color(28, 255, 255, 255), 1.0f);
+        }
 
         HBITMAP hb = LoadIconFor(cat.items[k].path, 256);
         if (hb) {
             Bitmap ib(hb, nullptr);
-            g2.DrawImage(&ib, RectF(x + (tw - isz) / 2.0f, y + (float)Scale(g.s, 12), (float)isz, (float)isz));
+            float iy = y + (float)Scale(g.s, 14) - (hot ? 1.0f : 0.0f);
+            g2.DrawImage(&ib, RectF(x + (tw - isz) / 2.0f, iy, (float)isz, (float)isz));
         }
-        RectF tr(x + 4, y + (float)Scale(g.s, 12 + g.cfg.iconSize + 6), (float)(tw - 8),
-                 (float)(th - Scale(g.s, 12 + g.cfg.iconSize + 6) - 6));
-        DrawTextWrap(g2, cat.items[k].label, gFonts.tile, tr, HexColor(g.cfg.fg, 235));
+        RectF tr(x + 6, y + (float)Scale(g.s, 14 + g.cfg.iconSize + 8), (float)(tw - 12),
+                 (float)(th - Scale(g.s, 14 + g.cfg.iconSize + 8) - 8));
+        DrawTextWrap(g2, cat.items[k].label, gFonts.tile, tr, Color(255, 240, 240, 243));
     }
 }
 
@@ -494,7 +566,7 @@ static void ShowRail() {
     ComputeColumns();
     gRailGeom = ComputeRailGeom();
     PaintRail(gRailGeom);
-    surfRail.Present(gRailGeom.railX, gRailGeom.railY);
+    surfRail.Present(gRailGeom.railX - ShadowPx(), gRailGeom.railY - ShadowPx());
     ShowWindow(g.rail, SW_SHOWNOACTIVATE);
 }
 
@@ -513,7 +585,7 @@ static void HideFly() {
     g.curCat = -1;
     gFlyCat = -1;
     ShowWindow(g.fly, SW_HIDE);
-    if (g.railOn) { PaintRail(gRailGeom); surfRail.Present(gRailGeom.railX, gRailGeom.railY); }
+    if (g.railOn) { PaintRail(gRailGeom); surfRail.Present(gRailGeom.railX - ShadowPx(), gRailGeom.railY - ShadowPx()); }
 }
 
 static void ShowFly(int idx) {
@@ -527,9 +599,9 @@ static void ShowFly(int idx) {
     gFlyGeom = gm;
     PaintFly(idx, gFlyGeom);
     ShowWindow(g.fly, SW_SHOWNOACTIVATE);
-    surfFly.Present(gFlyGeom.flyX, gFlyGeom.flyY);
+    surfFly.Present(gFlyGeom.flyX - ShadowPx(), gFlyGeom.flyY - ShadowPx());
     PaintRail(gRailGeom);
-    surfRail.Present(gRailGeom.railX, gRailGeom.railY);
+    surfRail.Present(gRailGeom.railX - ShadowPx(), gRailGeom.railY - ShadowPx());
 }
 
 // ---------------------------------------------------------------- actions
@@ -623,7 +695,7 @@ static void DropAt(POINT p) {
         ComputeColumns();
         gRailGeom = ComputeRailGeom();
         PaintRail(gRailGeom);
-        surfRail.Present(gRailGeom.railX, gRailGeom.railY);
+        surfRail.Present(gRailGeom.railX - ShadowPx(), gRailGeom.railY - ShadowPx());
         ShowFly(targetRow);
     }
 }
@@ -644,7 +716,7 @@ static void TrayMenu(HWND hwnd) {
     DestroyMenu(m);
     if (cmd == 1001) { if (g.railOn) HideRail(); else ShowRail(); }
     else if (cmd == 1002) ShellExecuteW(nullptr, L"open", IniPath().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-    else if (cmd == 1003) { LoadCategories(); ComputeColumns(); gRailGeom = ComputeRailGeom(); if (g.railOn) { PaintRail(gRailGeom); surfRail.Present(gRailGeom.railX, gRailGeom.railY); } }
+    else if (cmd == 1003) { LoadCategories(); ComputeColumns(); gRailGeom = ComputeRailGeom(); if (g.railOn) { PaintRail(gRailGeom); surfRail.Present(gRailGeom.railX - ShadowPx(), gRailGeom.railY - ShadowPx()); } }
     else if (cmd == 1004) PostQuitMessage(0);
 }
 
@@ -777,6 +849,17 @@ static void Tick() {
     bool inRail = g.railOn && PtInRect(&rr, p) != 0;
     bool inFly = g.flyOn && PtInRect(&fr, p) != 0;
 
+    if (g.flyOn && !g.dragging) {
+        int hv = inFly ? TileAt(p, gFlyCat) : -1;
+        if (hv != gHoverTile) {
+            gHoverTile = hv;
+            PaintFly(gFlyCat, gFlyGeom);
+            surfFly.Present(gFlyGeom.flyX - ShadowPx(), gFlyGeom.flyY - ShadowPx());
+        }
+    } else if (!g.flyOn && gHoverTile != -1) {
+        gHoverTile = -1;
+    }
+
     if (down && !prevDown) {
         g.pressTick = GetTickCount();
         g.pressPending = true;
@@ -832,7 +915,7 @@ static void Tick() {
             if (row != g.hoverRow) {
                 g.hoverRow = row;
                 PaintRail(gRailGeom);
-                surfRail.Present(gRailGeom.railX, gRailGeom.railY);
+                surfRail.Present(gRailGeom.railX - ShadowPx(), gRailGeom.railY - ShadowPx());
             }
             if (row >= 0 && row != g.curCat) ShowFly(row);
         }

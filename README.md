@@ -41,6 +41,17 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 卸载：删掉该目录 + 启动项里的 `SideOpen.lnk`。
 
+
+## 视觉
+
+macOS 风格深色材质：
+
+- 面板是竖向渐变 + 半透明的材质，不是纯色块
+- 外圈一圈柔和投影（分层窗口里用 20 层递减 alpha 的圆角矩形堆出来）
+- 1px 内高光 + 1px 外描边，模拟 macOS 的 rim light
+- 分类栏行高 40、圆角 7 的胶囊选中态，右侧对齐条目计数
+- 应用网格悬停时出现圆角底板 + 图标轻微上浮
+
 ## 数据来源
 
 读桌面（或 `config.ini` 里 `root` 指定的目录）下所有形如 `01_xxx` 的文件夹，一个文件夹 = 一个分类：
