@@ -1,4 +1,4 @@
-
+﻿
 $ErrorActionPreference = "Stop"
 $src = Join-Path $PSScriptRoot "hover-dock.ps1"
 if (-not (Test-Path $src)) { throw "hover-dock.ps1 not found" }

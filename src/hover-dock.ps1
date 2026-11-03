@@ -1,4 +1,4 @@
-
+﻿
 param(
   [switch]$Demo,
   [int]$DemoSeconds = 12,
