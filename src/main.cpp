@@ -474,6 +474,17 @@ static void DrawPanelChrome(Graphics& g2, RectF r, float rad) {
     StrokeRound(g2, RectF(r.X - 0.5f, r.Y - 0.5f, r.Width + 1, r.Height + 1), rad, Color(70, 0, 0, 0), 1.0f);
 }
 
+// inline search: the rail itself becomes the input + result list
+static DWORD gCaretT0 = 0;
+static bool gCaretOn = true;
+
+static int RailRowsForSearch() {
+    int n = (int)g.searchHits.size();
+    if (n < 1) n = 1;
+    if (n > 6) n = 6;
+    return n;
+}
+
 static void PaintRail(Geom& o) {
     int m = ShadowPx();
     surfRail.Ensure(o.railW + 2 * m, o.railH + 2 * m);
@@ -492,50 +503,87 @@ static void PaintRail(Geom& o) {
         RectF((float)Scale(g.s, 20), (float)Scale(g.s, 14), 60.f, (float)Scale(g.s, 22)),
         Color(170, 255, 255, 255), StringAlignmentNear);
 
-    {
-        float px = (float)Scale(g.s, 66);
-        float py = (float)Scale(g.s, 10);
-        float pw = (float)o.railW - px - (float)Scale(g.s, 12);
-        float ph = (float)Scale(g.s, 26);
-        RectF pill(px, py, pw, ph);
-        FillRound(g2, pill, ph / 2.0f, Color(30, 255, 255, 255));
-        StrokeRound(g2, RectF(pill.X + 0.5f, pill.Y + 0.5f, pill.Width - 1, pill.Height - 1), ph / 2.0f, Color(26, 255, 255, 255), 1.0f);
+    // ---- search field (always drawn; it is the pill next to the title)
+    float px = (float)Scale(g.s, 62);
+    float py = (float)Scale(g.s, 9);
+    float pw = (float)o.railW - px - (float)Scale(g.s, 12);
+    float ph = (float)Scale(g.s, 28);
+    RectF pill(px, py, pw, ph);
+    FillRound(g2, pill, ph / 2.0f, g.searching ? Color(46, 255, 255, 255) : Color(30, 255, 255, 255));
+    StrokeRound(g2, RectF(pill.X + 0.5f, pill.Y + 0.5f, pill.Width - 1, pill.Height - 1), ph / 2.0f,
+        g.searching ? HexColor(g.cfg.accent, 220) : Color(26, 255, 255, 255), 1.0f);
 
-        float icx = pill.X + (float)Scale(g.s, 14);
-        float icy = pill.Y + ph / 2.0f;
-        Pen sp(Color(170, 255, 255, 255), 1.6f);
-        g2.DrawEllipse(&sp, RectF(icx - 4.5f, icy - 4.5f, 9.0f, 9.0f));
-        g2.DrawLine(&sp, icx + 3.0f, icy + 3.0f, icx + 6.5f, icy + 6.5f);
+    float icx = pill.X + (float)Scale(g.s, 14);
+    float icy = pill.Y + ph / 2.0f;
+    Pen sp(Color(g.searching ? 220 : 170, 255, 255, 255), 1.6f);
+    g2.DrawEllipse(&sp, RectF(icx - 4.5f, icy - 4.5f, 9.0f, 9.0f));
+    g2.DrawLine(&sp, icx + 3.0f, icy + 3.0f, icx + 6.5f, icy + 6.5f);
 
-        wstring hint = g.query.empty() ? L"搜索" : g.query;
-        Color hc = g.query.empty() ? Color(125, 255, 255, 255) : Color(240, 255, 255, 255);
-        DrawText2(g2, hint, gFonts.count,
-            RectF(pill.X + (float)Scale(g.s, 25), pill.Y, pill.Width - (float)Scale(g.s, 31), pill.Height),
-            hc, StringAlignmentNear);
+    float tx = pill.X + (float)Scale(g.s, 25);
+    float tw2 = pill.Width - (float)Scale(g.s, 31);
+    if (!g.searching && g.query.empty()) {
+        DrawText2(g2, L"搜索", gFonts.count, RectF(tx, pill.Y, tw2, pill.Height), Color(125, 255, 255, 255), StringAlignmentNear);
+    } else {
+        DrawText2(g2, g.query, gFonts.count, RectF(tx, pill.Y, tw2, pill.Height), Color(245, 255, 255, 255), StringAlignmentNear);
+        if (g.searching && gCaretOn) {
+            RectF box = RectF(tx, pill.Y, tw2, pill.Height);
+            RectF measured;
+            g2.MeasureString(g.query.c_str(), (INT)g.query.size(), gFonts.count, box, &measured);
+            float cx = tx + (g.query.empty() ? 1.0f : measured.Width + 1.0f);
+            float bottom = pill.Y + ph - (float)Scale(g.s, 8);
+            Pen cp(Color(235, 90, 170, 255), 1.6f);
+            g2.DrawLine(&cp, cx, pill.Y + (float)Scale(g.s, 7), cx, bottom);
+        }
     }
 
-    float rowTop = (float)o.headH - (float)Scale(g.s, 6);
-    for (size_t i = 0; i < g.cats.size(); i++) {
-        float y = rowTop + (float)((int)i * o.rowH);
-        RectF row((float)Scale(g.s, 8), y, (float)(o.railW - Scale(g.s, 16)), (float)(o.rowH - Scale(g.s, 4)));
-        bool active = ((int)i == g.curCat) && g.flyOn;
-        bool hovering = ((int)i == g.hoverRow) && g.railOn;
-        if (active) {
-            FillRound(g2, row, (float)Scale(g.s, 7), HexColor(g.cfg.accent, 235));
-            StrokeRound(g2, RectF(row.X + 0.5f, row.Y + 0.5f, row.Width - 1, row.Height - 1), (float)Scale(g.s, 7), Color(40, 255, 255, 255), 1.0f);
-        } else if (hovering) {
-            FillRound(g2, row, (float)Scale(g.s, 7), Color(26, 255, 255, 255));
+    if (!g.searching) {
+        float rowTop = (float)o.headH - (float)Scale(g.s, 6);
+        for (size_t i = 0; i < g.cats.size(); i++) {
+            float y = rowTop + (float)((int)i * o.rowH);
+            RectF row((float)Scale(g.s, 8), y, (float)(o.railW - Scale(g.s, 16)), (float)(o.rowH - Scale(g.s, 4)));
+            bool active = ((int)i == g.curCat) && g.flyOn;
+            bool hovering = ((int)i == g.hoverRow) && g.railOn;
+            if (active) {
+                FillRound(g2, row, (float)Scale(g.s, 7), HexColor(g.cfg.accent, 235));
+                StrokeRound(g2, RectF(row.X + 0.5f, row.Y + 0.5f, row.Width - 1, row.Height - 1), (float)Scale(g.s, 7), Color(40, 255, 255, 255), 1.0f);
+            } else if (hovering) {
+                FillRound(g2, row, (float)Scale(g.s, 7), Color(26, 255, 255, 255));
+            }
+            Color fg = active ? Color(255, 255, 255, 255) : Color(255, 246, 246, 248);
+            DrawText2(g2, g.cats[i].folder, gFonts.row,
+                RectF(row.X + (float)Scale(g.s, 12), row.Y, row.Width - (float)Scale(g.s, 46), row.Height), fg, StringAlignmentNear);
+            Color cn = active ? Color(200, 255, 255, 255) : Color(135, 255, 255, 255);
+            DrawText2(g2, std::to_wstring(g.cats[i].items.size()), gFonts.count,
+                RectF(row.X, row.Y, row.Width - (float)Scale(g.s, 10), row.Height), cn, StringAlignmentFar);
         }
+        return;
+    }
 
-        Color fg = active ? Color(255, 255, 255, 255) : Color(255, 246, 246, 248);
-        wstring label = g.cats[i].folder;
-        DrawText2(g2, label, gFonts.row,
-            RectF(row.X + (float)Scale(g.s, 12), row.Y, row.Width - (float)Scale(g.s, 46), row.Height),
-            fg, StringAlignmentNear);
-
-        Color cn = active ? Color(200, 255, 255, 255) : Color(135, 255, 255, 255);
-        DrawText2(g2, std::to_wstring(g.cats[i].items.size()), gFonts.count,
-            RectF(row.X, row.Y, row.Width - (float)Scale(g.s, 10), row.Height), cn, StringAlignmentFar);
+    // ---- results list under the field
+    float rowTop = (float)o.headH - (float)Scale(g.s, 4);
+    int shown = (int)g.searchHits.size();
+    if (shown > 6) shown = 6;
+    if (shown == 0) {
+        wstring msg = g.query.empty() ? L"输入以搜索" : L"没有匹配项";
+        DrawText2(g2, msg, gFonts.count,
+            RectF((float)Scale(g.s, 12), rowTop, (float)o.railW - (float)Scale(g.s, 24), (float)o.rowH),
+            Color(120, 255, 255, 255), StringAlignmentNear);
+        return;
+    }
+    for (int i = 0; i < shown; i++) {
+        float y = rowTop + (float)(i * o.rowH);
+        RectF row((float)Scale(g.s, 8), y, (float)(o.railW - Scale(g.s, 16)), (float)(o.rowH - Scale(g.s, 4)));
+        bool sel = (i == g.searchSel);
+        if (sel) FillRound(g2, row, (float)Scale(g.s, 7), HexColor(g.cfg.accent, 235));
+        int isz = Scale(g.s, 18);
+        HBITMAP hb = LoadIconFor(g.searchHits[i]->path, 256);
+        if (hb) {
+            Bitmap ib(hb, nullptr);
+            g2.DrawImage(&ib, RectF(row.X + (float)Scale(g.s, 9), row.Y + (float)((o.rowH - Scale(g.s, 4) - isz) / 2), (float)isz, (float)isz));
+        }
+        Color fg = sel ? Color(255, 255, 255, 255) : Color(240, 240, 240, 244);
+        DrawText2(g2, g.searchHits[i]->label, gFonts.count,
+            RectF(row.X + (float)Scale(g.s, 34), row.Y, row.Width - (float)Scale(g.s, 42), row.Height), fg, StringAlignmentNear);
     }
 }
 
@@ -679,6 +727,7 @@ static int gFlyCat = -1;
 static bool gPin = false;
 
 static void HideFly();
+static void SearchBuild();
 
 static RECT RailRect() { RECT r{ gRailGeom.railX, gRailGeom.railY, gRailGeom.railX + gRailGeom.railW, gRailGeom.railY + gRailGeom.railH }; return r; }
 static RECT FlyRect() { RECT r{ gFlyGeom.flyX, gFlyGeom.flyY, gFlyGeom.flyX + gFlyGeom.flyW, gFlyGeom.flyY + gFlyGeom.flyH }; return r; }
@@ -730,6 +779,74 @@ static void ShowFly(int idx) {
 
 // ---------------------------------------------------------------- actions
 static void Launch(const wstring& path) { ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); }
+
+static void LayoutRail() {
+    gRailGeom = ComputeRailGeom();
+    if (g.searching) {
+        int rows = (int)g.searchHits.size();
+        if (rows < 1) rows = 1;
+        if (rows > 6) rows = 6;
+        gRailGeom.railH = gRailGeom.headH + rows * gRailGeom.rowH + Scale(g.s, 6);
+    }
+}
+
+static void SearchRepaint() {
+    LayoutRail();
+    PaintRail(gRailGeom);
+    PresentRailStatic();
+}
+
+static void EnterSearch() {
+    if (g.searching) return;
+    g.searching = true;
+    g.query.clear();
+    g.searchSel = 0;
+    g.searchHits.clear();
+    gCaretOn = true;
+    gCaretT0 = GetTickCount();
+    LONG_PTR ex = GetWindowLongPtrW(g.rail, GWL_EXSTYLE);
+    SetWindowLongPtrW(g.rail, GWL_EXSTYLE, ex & ~WS_EX_NOACTIVATE);
+    SetForegroundWindow(g.rail);
+    SetFocus(g.rail);
+    SearchRepaint();
+}
+
+static void ExitSearch() {
+    if (!g.searching) return;
+    g.searching = false;
+    g.query.clear();
+    g.searchHits.clear();
+    LONG_PTR ex = GetWindowLongPtrW(g.rail, GWL_EXSTYLE);
+    SetWindowLongPtrW(g.rail, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
+    LayoutRail();
+    PaintRail(gRailGeom);
+    PresentRailStatic();
+}
+
+static void SearchInput(wchar_t ch) {
+    if (!g.searching) return;
+    if (ch == 27) { ExitSearch(); return; }
+    if (ch == L'\r') {
+        if (!g.searchHits.empty()) {
+            int i = Clamp(g.searchSel, 0, (int)g.searchHits.size() - 1);
+            Launch(g.searchHits[i]->path);
+            ExitSearch();
+        }
+        return;
+    }
+    if (ch == 8) { if (!g.query.empty()) g.query.pop_back(); }
+    else if (ch >= 32) g.query.push_back(ch);
+    g.searchSel = 0;
+    SearchBuild();
+    SearchRepaint();
+}
+
+static void SearchKey(int vk) {
+    if (!g.searching) return;
+    if (vk == VK_ESCAPE) { ExitSearch(); return; }
+    if (vk == VK_DOWN) { if (g.searchSel + 1 < (int)g.searchHits.size()) g.searchSel++; SearchRepaint(); return; }
+    if (vk == VK_UP) { if (g.searchSel > 0) g.searchSel--; SearchRepaint(); return; }
+}
 
 static RECT SearchPillRect() {
     Geom& o = gRailGeom;
@@ -987,15 +1104,20 @@ static void Tick() {
     }
 
     bool down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-    static bool prevDownSearch = false;
+
     if (g.searching) {
-        if (down && !prevDownSearch) {
-            POINT q; GetCursorPos(&q);
-            RECT sr{ gSearchX, gSearchY, gSearchX + gSearchW, gSearchY + Scale(g.s, 70) + 8 * Scale(g.s, 46) };
-            if (!PtInRect(&sr, q)) SearchHide();
-        }
-        prevDownSearch = down;
         g.missTicks = 0;
+        if (!g.railOn) ShowRail();
+        if (GetTickCount() - gCaretT0 > 520) {
+            gCaretT0 = GetTickCount();
+            gCaretOn = !gCaretOn;
+            PaintRail(gRailGeom);
+            PresentRailStatic();
+        }
+        RECT rr2 = RailRect();
+        if (!PtInRect(&rr2, p) && down) ExitSearch();
+        prevDown = down;
+        return;
     }
 
     if (g.cfg.hideFullscreen && FullscreenActive()) {
@@ -1067,13 +1189,24 @@ static void Tick() {
 
 // ---------------------------------------------------------------- procs
 static void HandleClick(POINT p) {
+    if (g.searching) {
+        if (p.y >= gRailGeom.railY + gRailGeom.headH - Scale(g.s, 4)) {
+            int rel = p.y - (gRailGeom.railY + gRailGeom.headH - Scale(g.s, 4));
+            int row = rel / gRailGeom.rowH;
+            if (row >= 0 && row < (int)g.searchHits.size()) {
+                Launch(g.searchHits[row]->path);
+                ExitSearch();
+            }
+        }
+        return;
+    }
     if (g.flyOn) {
         int idx = TileAt(p, gFlyCat);
         if (idx >= 0) { Launch(g.cats[gFlyCat].items[idx].path); return; }
     }
     if (g.railOn) {
         RECT pr = SearchPillRect();
-        if (PtInRect(&pr, p)) { SearchShow(); return; }
+        if (PtInRect(&pr, p)) { EnterSearch(); return; }
         int row = RowAt(p);
         if (row >= 0) ShowFly(row);
     }
@@ -1101,6 +1234,12 @@ static LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wasPending && !g.dragging) HandleClick(p);
         return 0;
     }
+    case WM_CHAR:
+        if (g.searching) { SearchInput((wchar_t)wp); return 0; }
+        break;
+    case WM_KEYDOWN:
+        if (g.searching) { SearchKey((int)wp); return 0; }
+        break;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -1111,7 +1250,12 @@ static LRESULT CALLBACK MsgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == kTimer) Tick();
         else if (wp == (WPARAM)kAnimTimer) AnimTick();
         return 0;
-    case WM_HOTKEY: if (wp == 1) { if (g.searching) SearchHide(); else SearchShow(); } return 0;
+    case WM_HOTKEY:
+        if (wp == 1) {
+            if (g.searching) { ExitSearch(); }
+            else { ShowRail(); EnterSearch(); }
+        }
+        return 0;
     case WM_TRAY: if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP) TrayMenu(hwnd); return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
