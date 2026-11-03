@@ -1,13 +1,15 @@
-# logs / runtime state
+# build output
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.exp
+
+# runtime
 *.log
 *.pid
 
-# local artifacts
-tmp/
-*.tmp
+# editor
 .vscode/
 .idea/
-
-# screenshots of a real desktop must never be committed
-*.png
-*.jpg

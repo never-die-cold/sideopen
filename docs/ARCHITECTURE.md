@@ -1,194 +1,135 @@
-# 架构与实现
+# 架构（原生实现）
 
-## 1. 总体模型
+## 1. 进程模型
 
-一个 PowerShell 进程，一个 WinForms 消息循环，两个无边框顶层窗口：
-
-```
-            ┌──────────────────────────┐  ┌──────────────┐
-  屏幕右缘   │        应用面板 fly        │  │  目录 rail    │
-  6px 感应区 │  (MacPanel × 分类, 3~N 列) │  │ 分类行 × N    │
-            └──────────────────────────┘  └──────────────┘
-                     ↑ 悬停分类 → 切换内容        ↑ 贴边滑出
-```
-
-- **rail**：常驻，平时移出屏幕（`x = 屏宽`），贴边时滑到 `屏宽 - 宽 - 6`
-- **fly**：默认移出屏幕，只在鼠标落到某个分类行时出现，出现在 rail 左侧
-- 两者**右边缘与左边缘严丝合缝**：`fly.x + fly.w == rail.x`
-
-为什么要零间隙：早期版本留了 9px 空隙，鼠标从目录横移到应用时会在空隙里"两边都不算"，
-判定在开/合之间反复横跳，表现为面板一闪一闪。现在用「hot / rail / fly 三个矩形取并集」判定，
-并且两个窗口紧贴，视觉上也连贯。
-
-## 2. 状态机
-
-挂在 `System.Windows.Forms.Timer`（70ms）上的单一轮询：
+单进程、单线程、一个消息循环。没有后台工作线程：所有交互都在 60ms 定时器里完成。
 
 ```
-每 tick:
-  if 正在拖拽:
-       if 鼠标键已松开 → End-Drag     // 兜底，防丢捕获
-       return
-  inHot  = 光标在屏幕右缘 6px 内 且 Y 落在 rail 的纵向范围
-  inRail = rail 已展开 且 光标在 rail 矩形内
-  inFly  = fly 已展开 且 光标在 fly 矩形内
+wWinMain
+├─ SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)
+├─ CoInitializeEx(APARTMENTTHREADED)        // 取图标要用 Shell COM
+├─ GdiplusStartup
+├─ CreateMutex("SideOpen.SingleInstance")   // 单实例
+├─ 读 config.ini → 扫描分类目录 → 算列数
+├─ 注册窗口类 / 创建面板窗口（隐藏）/ 托盘 / 全局热键
+├─ SetTimer(60ms)
+└─ GetMessage 循环
+```
+
+## 2. 窗口
+
+| 窗口 | 样式 | 用途 |
+|---|---|---|
+| rail | LAYERED + TOOLWINDOW + TOPMOST + NOACTIVATE | 分类栏 |
+| fly | 同上 | 应用网格 |
+| ghost | 同上 | 拖拽时跟随鼠标的"幽灵" |
+| search | TOOLWINDOW + TOPMOST（可激活） | 搜索框，需要键盘焦点 |
+| msgw | HWND_MESSAGE | 托盘回调 / 定时器 / 热键 |
+
+面板全是 `WS_POPUP` + 分层，无标题栏、不进任务栏、不抢焦点。
+
+## 3. 渲染管线
+
+### 3.1 表面
+
+```cpp
+CreateDIBSection(32bpp, BI_RGB, top-down)           // 像素缓冲
+new Bitmap(w, h, w*4, PixelFormat32bppPARGB, bits)  // GDI+ 直接画进这块内存
+new Graphics(bitmap)                                // 抗锯齿 + 文字
+```
+
+画完 `Graphics::Flush(FlushIntentionSync)`，然后：
+
+```cpp
+UpdateLayeredWindow(hwnd, screenDC, &dst, &size, memDC, &src, 0, &blend, ULW_ALPHA)
+```
+
+`dst` 同时决定窗口位置，所以"展开/收起"只改 `dst`、不改尺寸 —— 这是不闪的根本原因。
+
+### 3.2 为什么必须 PARGB
+
+`UpdateLayeredWindow + AC_SRC_ALPHA` 要求**预乘 alpha**。GDI+ 在 `PixelFormat32bppPARGB` 上绘制时自动预乘，
+半透明背景、圆角、文字混在一起结果才正确。误用 `PixelFormat32bppARGB` 会出现黑边。
+
+### 3.3 圆角
+
+`GraphicsPath` 拼四段 `AddArc`。窗口是矩形，但四角 alpha=0，所以视觉上是抗锯齿圆角。
+比 `SetWindowRgn` 好：后者没有抗锯齿。
+
+## 4. 交互状态机
+
+**不使用 WM_MOUSEMOVE / WM_LBUTTONDOWN**。面板是 `WS_EX_NOACTIVATE`，焦点行为不可靠，
+而且拖拽时光标可能在窗口外。所以统一在 `Tick()` 里轮询：
+
+```
+每 60ms:
+  p = GetCursorPos();  down = GetAsyncKeyState(VK_LBUTTON)
+
+  if hideFullscreen && FullscreenActive(): 收起; return
+
+  inHot  = PtInRect(hotRect, p)
+  inRail = railOn && PtInRect(railRect, p)
+  inFly  = flyOn  && PtInRect(flyRect, p)
+
+  if down && !prevDown: 记录按下点 + 候选 tile
+  if 按住 <420ms 且位移 <5px: 继续等
+  if 按住 >420ms 且未移动: 进入拖拽（显示 ghost）
+  if !down && prevDown: 未拖拽 → 点击（启动 / 切分类）
 
   if inHot || inRail || inFly:
-       miss = 0
-       确保 rail 展开
-       if inRail: 根据 Y 算出分类索引 idx，变了就 Show-Fly(idx)
+      miss = 0; 确保 rail 显示
+      if inRail: 由 Y 算分类行，变了就 ShowFly(row)
   else:
-       miss++
-       if miss >= 3: 收起 fly、收起 rail      // 3×70ms ≈ 210ms 容差
+      if ++miss >= 3: 收起
 ```
 
-关键点：
+**3 帧容差** ≈180ms，光标在边界抖动时不会闪。
 
-- **只有位置变化，没有尺寸变化**。窗口从头到尾保持固定大小，展开/收起只改 `SetBounds` 的 X。
-  改尺寸会触发整窗重绘，是可见闪烁的主要来源之一。
-- **3 帧容差**：边界上偶尔的抖动不会立刻收起面板。
-- **拖拽期间冻结**：拖拽时直接 return，避免面板在拖的过程中换分类或收起。
+## 5. 几何
 
-## 3. 渲染
+`ComputeRailGeom()` 按 `edge` 算分类栏 + 热区；`ComputeFlyGeom(idx)` 算应用面板。
 
-### 3.1 自绘控件
+- right：分类栏贴右，面板在左
+- left：反过来
+- top / bottom：分类栏居中贴边，面板在侧边
 
-`ui-types.cs` 里三个类：
+面板高度按**当前分类自己的行数**算，不是全局最大值。
 
-| 类 | 职责 |
-|---|---|
-| `MacTile` | 一个应用格子：底板、悬停圆角高亮、44px 图标、下方标签 |
-| `MacRow` | 一个分类行：常态 / 悬停 / 选中（蓝色实心）/ 拖拽目标（蓝色描边） |
-| `Win32` | `SHGetFileInfo` 取图标、`SetWindowCompositionAttribute`（预留）、DPI 感知 |
+## 6. 图标
 
-圆角用 `GraphicsPath` 拼四段 `AddArc`，窗口圆角用 `Region` 裁剪。
-
-### 3.2 踩过的坑：空白块
-
-第一版四个自绘类都开了：
-
-```csharp
-SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
-         ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+```cpp
+SHCreateItemFromParsingName(lnk) → IShellItemImageFactory::GetImage(256, ICONONLY|BIGGERSIZEOK)
 ```
 
-而 `OnPaint` **只画图标和文字，从不铺底色**。
+失败回退 `SHGetFileInfo(SHGFI_ICON | SHGFI_LARGEICON)`。按路径缓存在 `std::map<wstring, HBITMAP>`。
 
-`UserPaint + AllPaintingInWmPaint` 会让 Windows 跳过 `WM_ERASEBKGND`（原本负责"先铺背景"），
-于是窗口只要发生局部重绘（切分类、被别的窗口遮挡再露出、改大小），没被画到的区域就保持"未初始化"，
-直接透出后面的窗口——表现为一块块白色/空白，看起来像图标丢了。
+取 256px 再缩到 44 逻辑像素，比 32px 放大清晰得多。
 
-修法：每个自绘类在 `OnPaint` 开头先 `FillRectangle(ClientRectangle)` 铺一层 `Base` 底色，
-`MacPanel` / `MacForm` 用 `BackColor`。改完之后所有分类都稳定。
+## 7. 拖拽
 
-### 3.3 为什么没有毛玻璃
+- 长按判定在 `Tick`（时间 + 位移），不依赖窗口消息
+- ghost 是独立分层窗口，跟随光标
+- 松手 `RowAt(cursor)` 判断落点分类；同分类 → 取消
+- `MoveFileW` 移动，同名生成 `name (2).lnk`
+- 之后清图标缓存、重扫目录、重算几何、重绘
 
-试过 DWM 的 Acrylic（`SetWindowCompositionAttribute` + `ACCENT_ENABLE_ACRYLICBLURBEHIND`）：
-渐变色的 alpha 一调低（想透出模糊背景），自绘控件的区域就开始出现未重绘的色块；
-调高则等于不透明。`Form.Opacity`（分层窗口）同样会让自绘子控件渲染错乱。
+## 8. 搜索
 
-结论：WinForms 这条路上，**自绘 + 半透明/模糊不可靠**。想要真毛玻璃得换 WPF / WinUI。
-所以现在是**不透明深灰 + 圆角 + 高对比排版**，视觉上仍然成立。
+`Ctrl+Alt+Space` 用 `RegisterHotKey` 注册在 msgw 上。
+搜索窗口是唯一**可激活**的窗口，`SetForegroundWindow + SetFocus` 后才收得到 `WM_CHAR`。
 
-### 3.4 DPI
+输入 → `StrStrIW` 匹配全部 label → 最多 8 条 → ↑↓ 选择 → Enter 启动 → Esc 关闭。
 
-进程启动时 `[Win32]::SetProcessDPIAware()`，之后所有坐标都是物理像素。
-布局里所有尺寸都过一遍 `U()`：
+## 9. 全屏检测
 
-```powershell
-$S = [double]([System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero)).DpiX / 96.0
-function U([double]$v) { [int][Math]::Round($v * $S) }
-```
+`SHQueryUserNotificationState` 返回 `QUNS_RUNNING_D3D_FULL_SCREEN / PRESENTATION_MODE / BUSY` 时收起。
 
-这样 150% 缩放的屏幕上不会糊、也不会出现半个像素的缝。
+## 10. 与 PowerShell 版对比
 
-## 4. 布局计算
-
-每个分类独立算列数，避免"一个分类条目多，所有分类都被撑成宽面板"：
-
-```
-rowsLimit = floor((屏高 × 0.84 - 标题高) / (行高 + 间距))      // 本机约 6 行
-cols[i]   = max(3, ceil(条目数[i] / rowsLimit))
-rows[i]   = ceil(条目数[i] / cols[i])
-flyW[i]   = pad×2 + cols[i]×格子宽 + (cols[i]-1)×间距
-flyH[i]   = 标题高 + rows[i]×(格子高+间距) - 间距 + pad
-```
-
-面板宽度/高度取当前分类自己的值，展开时按需 `SetBounds` + 重设 `Region`。
-
-## 5. 图标
-
-两级回退：
-
-1. `[System.Drawing.Icon]::ExtractAssociatedIcon(target)`
-   —— 对 `.lnk` 先解析目标（`WScript.Shell` 的 `CreateShortcut`），拿目标 exe 的图标
-2. `SHGetFileInfo(path, SHGFI_ICON)`
-   —— 文件夹、`.url`、以及第 1 步失败时的兜底
-
-拿到的 32px 图标用 `HighQualityBicubic` 放大到 48px 再用。结果按文件路径缓存在哈希表里，
-拖拽/切换分类不会重复提取。
-
-## 6. 长按拖拽
-
-### 6.1 事件链
-
-`MacTile` 内置一个 420ms 的 `System.Windows.Forms.Timer`：
-
-```
-MouseDown  → 记录按下点，armed = true，启动计时器，Capture = true
-Timer.Tick → 若仍 armed 且未进入拖拽：置 dragging，触发 LongPress
-MouseMove  → 拖拽前若位移 > 5px：取消（保证普通点击/滑动不受影响）
-             拖拽中：触发 DragMoveScreen
-MouseUp    → 停表；若在拖拽：触发 DragRelease
-```
-
-PowerShell 侧订阅这三个事件：`Start-Drag` / `Update-Drag` / `End-Drag`。
-
-### 6.2 幽灵窗口
-
-长按后新建一个小 `MacForm`（无边框、置顶、圆角），里面塞一个只用于显示的 `MacTile`，
-每次 `DragMove` 时把它的位置设成 `光标 - 半格`。真实格子本身不动。
-
-### 6.3 落点判定
-
-`End-Drag` 时用 `Row-At(光标)` 把 Y 换算成分类索引：
-
-```
-rel = cursorY - railY - 标题高
-idx = floor(rel / 行高)      // 越界或 X 不在 rail 内 → -1
-```
-
-- `idx < 0` 或等于源分类 → 取消
-- 否则 `Move-Item` 到目标分类文件夹；同名冲突自动加 `(2)`、`(3)` 后缀
-- 移动完 `Rebuild` 重建六个面板，并把 fly 重新指向目标分类
-
-### 6.4 兜底
-
-主循环里：拖拽状态为真但 `Control.MouseButtons == None` → 强制结束拖拽。
-防止焦点/鼠标捕获丢失时幽灵窗口永远跟着鼠标。
-
-## 7. 性能
-
-| 措施 | 原因 |
-|---|---|
-| 面板**预建**，切换只改 `Visible` | 早期版本每次切换都 `Controls.Clear()` 重建十几个控件，一帧白屏 |
-| 图标缓存 | 避免切换分类时重复解析 |
-| 70ms 轮询 | 只做几次矩形包含判断，CPU 占用接近 0 |
-| 尺寸不变只改位置 | 避免整窗重绘带来的闪烁 |
-
-## 8. 部署
-
-`install.ps1` 做四件事：
-
-1. 复制 `hover-dock.ps1` / `ui-types.cs` 到 `%LOCALAPPDATA%\HoverDock\`
-2. 写 `start-dock.vbs`（`WScript.Shell.Run` + 窗口样式 0，避免控制台黑框）
-3. 杀掉旧实例（按命令行匹配脚本路径）并启动新实例
-4. 在「启动」目录建 `Hover Dock.lnk` 指向 `wscript.exe start-dock.vbs`
-
-## 9. PowerShell 5.1 的两个坑
-
-1. **编码**：Windows PowerShell 5.1 读 `.ps1` 时，若无 BOM 会按系统 ANSI（中文环境是 GBK）解析，
-   文件里的中文全变乱码，甚至直接语法错误。所有含中文的 `.ps1` **必须带 UTF-8 BOM**。
-   `install.ps1` 里复制时显式用 `UTF8Encoding($true)` 重写，就是为了保证这一点。
-2. **事件作用域**：事件脚本块里读写脚本级变量必须显式 `$script:xxx`，
-   否则赋值会落到函数局部，表现为"状态改了但下一帧又变回去"。
+| 项 | PowerShell + WinForms | 原生 C++ |
+|---|---|---|
+| 常驻内存 | ~130 MB | ~16 MB 空闲 / ~45 MB 图标全载 |
+| 冷启动 | 1–2 s | < 100 ms |
+| 依赖 | PowerShell 5.1 + .NET Framework | 无 |
+| 透明 | 整窗 Opacity（自绘控件会画错） | 逐像素 alpha + 抗锯齿圆角 |
+| 闪烁 | 靠预建面板/不改尺寸规避 | 天然没有：整帧一次提交 |
