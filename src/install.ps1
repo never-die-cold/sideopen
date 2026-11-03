@@ -10,8 +10,7 @@ $code = [System.IO.File]::ReadAllText($src, [System.Text.Encoding]::UTF8)
 [System.IO.File]::WriteAllText($ps1, $code, (New-Object System.Text.UTF8Encoding($true)))
 $csSrc = Join-Path $PSScriptRoot "ui-types.cs"
 $csDst = Join-Path $dst "ui-types.cs"
-$csCode = [System.IO.File]::ReadAllText($csSrc, [System.Text.Encoding]::UTF8)
-[System.IO.File]::WriteAllText($csDst, $csCode, (New-Object System.Text.UTF8Encoding($true)))
+Copy-Item -LiteralPath $csSrc -Destination $csDst -Force
 $vbsPath = Join-Path $dst "start-dock.vbs"
 $vbs = 'Set s = CreateObject("WScript.Shell")' + [Environment]::NewLine +
        's.Run "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""' + $ps1 + '""", 0, False'
